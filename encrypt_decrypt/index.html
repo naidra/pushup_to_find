@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Encrypt Decrypt</title>
+    <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+    <main class="app-shell">
+        <section class="panel" aria-labelledby="page-title">
+            <div class="header">
+                <p class="eyebrow">WASM XOR Utility</p>
+                <h1 id="page-title">Live Text Encryption</h1>
+                <p class="subtitle">Type a message and see the encrypted hex output update instantly.</p>
+            </div>
+
+            <div class="workspace">
+                <section class="tool-section" aria-labelledby="encrypt-title">
+                    <div class="section-header">
+                        <h2 id="encrypt-title">Encode</h2>
+                        <span id="status" class="status">Loading WASM...</span>
+                    </div>
+
+                    <label class="field">
+                        <span>Text to encrypt</span>
+                        <textarea id="plainText" placeholder="Start typing..." rows="5" disabled></textarea>
+                    </label>
+
+                    <div class="result">
+                        <div class="result-header">
+                            <span>Encrypted output</span>
+                            <button id="copyButton" class="copy-button" type="button" disabled>Copy</button>
+                        </div>
+                        <output id="encryptedText" class="encrypted-text">Waiting for runtime...</output>
+                    </div>
+                </section>
+
+                <section class="tool-section" aria-labelledby="decode-title">
+                    <div class="section-header">
+                        <h2 id="decode-title">Decode</h2>
+                        <span id="decodeStatus" class="status">Paste encoded text</span>
+                    </div>
+
+                    <label class="field">
+                        <span>Encoded text</span>
+                        <textarea id="encodedText" placeholder="Paste encrypted hex here..." rows="5" disabled></textarea>
+                    </label>
+
+                    <div class="result result-light">
+                        <div class="result-header">
+                            <span>Decoded output</span>
+                        </div>
+                        <output id="decodedText" class="encrypted-text">Waiting for runtime...</output>
+                    </div>
+                </section>
+            </div>
+        </section>
+    </main>
+
+    <script>
+        const encryptionKey = 'secret';
+        let encryptToHex;
+        let decryptFromHex;
+
+        function updateEncryptedText() {
+            const input = document.getElementById('plainText');
+            const output = document.getElementById('encryptedText');
+            const copyButton = document.getElementById('copyButton');
+
+            if (!encryptToHex) {
+                output.textContent = 'Waiting for runtime...';
+                return;
+            }
+
+            const encrypted = input.value ? encryptToHex(input.value, encryptionKey) : '';
+            console.log('Encoded: ', encrypted);
+            output.textContent = encrypted || 'Type something to encrypt it.';
+            copyButton.disabled = !encrypted;
+            copyButton.textContent = 'Copy';
+        }
+
+        function updateDecodedText() {
+            const input = document.getElementById('encodedText');
+            const output = document.getElementById('decodedText');
+            const status = document.getElementById('decodeStatus');
+            const value = input.value.trim();
+
+            if (!decryptFromHex) {
+                output.textContent = 'Waiting for runtime...';
+                return;
+            }
+
+            if (!value) {
+                output.textContent = 'Paste encoded text to decode it.';
+                status.textContent = 'Paste encoded text';
+                return;
+            }
+
+            try {
+                const decoded = decryptFromHex(value, encryptionKey);
+                console.log('Decoded: ', decoded);
+                output.textContent = decoded || 'Unable to decode this value.';
+                status.textContent = decoded ? 'Decoded' : 'Invalid hex';
+            } catch (error) {
+                output.textContent = 'Unable to decode this value.';
+                status.textContent = 'Invalid hex';
+            }
+        }
+
+        async function copyEncryptedText() {
+            const output = document.getElementById('encryptedText');
+            const button = document.getElementById('copyButton');
+            const text = output.textContent;
+
+            if (!text || button.disabled) {
+                return;
+            }
+
+            if (navigator.clipboard) {
+                await navigator.clipboard.writeText(text);
+            } else {
+                const textarea = document.createElement('textarea');
+                textarea.value = text;
+                textarea.setAttribute('readonly', '');
+                textarea.className = 'clipboard-helper';
+                document.body.appendChild(textarea);
+                textarea.select();
+                document.execCommand('copy');
+                textarea.remove();
+            }
+
+            button.textContent = 'Copied';
+        }
+
+        var Module = {
+            onRuntimeInitialized: () => {
+                const plainInput = document.getElementById('plainText');
+                const encodedInput = document.getElementById('encodedText');
+                const copyButton = document.getElementById('copyButton');
+                const status = document.getElementById('status');
+
+                encryptToHex = Module.cwrap('encrypt_to_hex', 'string', ['string', 'string']);
+                decryptFromHex = Module.cwrap('decrypt_from_hex', 'string', ['string', 'string']);
+                plainInput.disabled = false;
+                encodedInput.disabled = false;
+                plainInput.focus();
+                status.textContent = 'Ready';
+                updateEncryptedText();
+                updateDecodedText();
+                plainInput.addEventListener('input', updateEncryptedText);
+                encodedInput.addEventListener('input', updateDecodedText);
+                copyButton.addEventListener('click', copyEncryptedText);
+            }
+        };
+    </script>
+    <script src="./encrypt_decrypt.js"></script>
+</body>
+</html>
