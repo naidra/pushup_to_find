@@ -649,7 +649,7 @@ export function VisionApp() {
             <div className="h-8 w-8 rounded-md bg-primary/10 text-primary flex items-center justify-center shrink-0">
               <Sparkles className="h-4 w-4" />
             </div>
-            <h1 className="text-sm font-semibold tracking-tight truncate">BrowserVision</h1>
+            <h1 className="text-sm font-semibold tracking-tight truncate">Push-up Counter</h1>
             <Badge
               variant="secondary"
               className="ml-1 hidden md:inline-flex text-[10px] font-normal"
