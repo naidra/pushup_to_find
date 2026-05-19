@@ -8,6 +8,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Progress } from "@/components/ui/progress";
 import { Loader2, Sparkles, Sun, Moon, ShieldCheck, Activity, RotateCcw, X } from "lucide-react";
 import { useTheme } from "@/hooks/use-theme";
 
@@ -69,6 +70,44 @@ const ENCRYPTED_REVEAL_URL =
   "0E1815071F5F5C5C05030C0703101D174B0400150511005D0902131202011601480F0E1A";
 const ENCRYPT_DECRYPT_ASSET_BASE = `${import.meta.env.BASE_URL}encrypt_decrypt`;
 const ENCRYPT_DECRYPT_RUNTIME_KEY = `encrypt-decrypt-public-v2:${ENCRYPT_DECRYPT_ASSET_BASE}`;
+
+const fetchPoseModelAsset = async (onProgress: (progress: number) => void, signal: AbortSignal) => {
+  const response = await fetch(POSE_MODEL_PATH, { signal });
+
+  if (!response.ok) {
+    throw new Error(`Unable to load pose model (${response.status})`);
+  }
+
+  const contentLength = Number(response.headers.get("content-length"));
+  if (!response.body || !Number.isFinite(contentLength) || contentLength <= 0) {
+    const buffer = new Uint8Array(await response.arrayBuffer());
+    onProgress(1);
+    return buffer;
+  }
+
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let received = 0;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    chunks.push(value);
+    received += value.length;
+    onProgress(Math.min(1, received / contentLength));
+  }
+
+  const buffer = new Uint8Array(received);
+  let offset = 0;
+  for (const chunk of chunks) {
+    buffer.set(chunk, offset);
+    offset += chunk.length;
+  }
+
+  onProgress(1);
+  return buffer;
+};
 
 const loadDecryptRuntime = () => {
   if (window.__encryptDecryptRuntimeKey !== ENCRYPT_DECRYPT_RUNTIME_KEY) {
@@ -359,6 +398,7 @@ export function VisionApp() {
 
   const [loading, setLoading] = useState(true);
   const [loadProgress, setLoadProgress] = useState("Initializing WASM runtime…");
+  const [loadPercent, setLoadPercent] = useState(0);
   const [revealedUrl, setRevealedUrl] = useState("");
   const [revealOpen, setRevealOpen] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -375,16 +415,26 @@ export function VisionApp() {
   // Load the pose model once on mount.
   useEffect(() => {
     let cancelled = false;
+    const abortController = new AbortController();
     (async () => {
       try {
+        setLoadPercent(8);
         setLoadProgress("Loading WASM runtime…");
         const fileset = await FilesetResolver.forVisionTasks(WASM_BASE);
         if (cancelled) return;
 
+        setLoadPercent(35);
         setLoadProgress("Loading pose landmarker…");
+        const modelAssetBuffer = await fetchPoseModelAsset((modelProgress) => {
+          if (cancelled) return;
+          setLoadPercent(Math.round(35 + modelProgress * 50));
+        }, abortController.signal);
+        if (cancelled) return;
+
+        setLoadPercent(90);
         const poseLandmarker = await PoseLandmarker.createFromOptions(fileset, {
           baseOptions: {
-            modelAssetPath: POSE_MODEL_PATH,
+            modelAssetBuffer,
             delegate: "GPU",
           },
           runningMode: "VIDEO",
@@ -400,14 +450,19 @@ export function VisionApp() {
         }
 
         poseLandmarkerRef.current = poseLandmarker;
+        setLoadPercent(100);
         setLoading(false);
       } catch (err) {
+        if ((err as Error).name === "AbortError") return;
+
         console.error(err);
+        setLoadPercent(0);
         setLoadProgress(`Failed to load models: ${(err as Error).message}`);
       }
     })();
     return () => {
       cancelled = true;
+      abortController.abort();
       poseLandmarkerRef.current?.close();
       audioContextRef.current?.close();
     };
@@ -678,9 +733,15 @@ export function VisionApp() {
       <main className="max-w-6xl mx-auto px-4 py-4 grid lg:grid-cols-[1fr_300px] gap-4">
         <Card className="relative overflow-hidden bg-muted/30 border-border aspect-video flex items-center justify-center p-0">
           {loading && (
-            <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-2 bg-background/90 backdrop-blur">
+            <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-background/90 px-6 backdrop-blur">
               <Loader2 className="h-6 w-6 animate-spin text-primary" />
-              <p className="text-xs text-muted-foreground">{loadProgress}</p>
+              <div className="w-full max-w-64 space-y-2">
+                <div className="flex items-center justify-between gap-3 text-xs text-muted-foreground">
+                  <p>{loadProgress}</p>
+                  <p className="font-mono tabular-nums text-foreground">{loadPercent}%</p>
+                </div>
+                <Progress value={loadPercent} aria-label={loadProgress} className="h-1.5" />
+              </div>
             </div>
           )}
 
