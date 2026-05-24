@@ -45,6 +45,13 @@ type PushUpTracker = {
   lastRepAt: number;
 };
 
+type SquatTracker = {
+  count: number;
+  phase: RepPhase;
+  kneeExtend: RepSignalTracker;
+  lastRepAt: number;
+};
+
 const MEDIAPIPE_ASSET_BASE = `${import.meta.env.BASE_URL}mediapipe`;
 const WASM_BASE = `${MEDIAPIPE_ASSET_BASE}/wasm`;
 const POSE_MODEL_PATH = `${MEDIAPIPE_ASSET_BASE}/models/pose_landmarker_full.task`;
@@ -64,6 +71,10 @@ const PUSHUP_RANGE_MIN = 0.1;
 const PUSHUP_POSTURE_MAX_VERTICAL_SPREAD = 0.36;
 const PUSHUP_POSTURE_MIN_HORIZONTAL_SPREAD = 0.18;
 const PUSHUP_COOLDOWN_MS = 500;
+const SQUAT_RANGE_MIN = 0.12;
+const SQUAT_POSTURE_MIN_VERTICAL_SPREAD = 0.42;
+const SQUAT_POSTURE_MAX_HORIZONTAL_SPREAD = 0.55;
+const SQUAT_COOLDOWN_MS = 650;
 const REVEAL_PUSHUP_COUNT = 100;
 const REVEAL_ENCRYPTION_KEY = "flawless";
 const ENCRYPTED_REVEAL_URL =
@@ -244,6 +255,37 @@ const getAverageElbowAngle = (landmarks: NormalizedLandmark[]) => {
   return angles.reduce((sum, angle) => sum + angle, 0) / angles.length;
 };
 
+const getAverageKneeAngle = (landmarks: NormalizedLandmark[]) => {
+  const sides = [
+    [23, 25, 27],
+    [24, 26, 28],
+  ] as const;
+  const angles = sides
+    .map(([hipIndex, kneeIndex, ankleIndex]) => {
+      const hip = landmarks[hipIndex];
+      const knee = landmarks[kneeIndex];
+      const ankle = landmarks[ankleIndex];
+
+      if (
+        !hip ||
+        !knee ||
+        !ankle ||
+        (hip.visibility ?? 0) < REP_BODY_LANDMARK_MIN_VISIBILITY ||
+        (knee.visibility ?? 0) < REP_BODY_LANDMARK_MIN_VISIBILITY ||
+        (ankle.visibility ?? 0) < REP_BODY_LANDMARK_MIN_VISIBILITY
+      ) {
+        return null;
+      }
+
+      return getAngle(hip, knee, ankle);
+    })
+    .filter((angle): angle is number => angle != null);
+
+  if (!angles.length) return null;
+
+  return angles.reduce((sum, angle) => sum + angle, 0) / angles.length;
+};
+
 const getPushUpPosture = (landmarks: NormalizedLandmark[]) => {
   const keyIndices = [11, 12, 23, 24, 25, 26, 27, 28];
   const points = keyIndices
@@ -268,6 +310,33 @@ const getPushUpPosture = (landmarks: NormalizedLandmark[]) => {
     horizontalSpread >= PUSHUP_POSTURE_MIN_HORIZONTAL_SPREAD &&
     verticalSpread <= PUSHUP_POSTURE_MAX_VERTICAL_SPREAD &&
     torsoVerticalGap <= PUSHUP_POSTURE_MAX_VERTICAL_SPREAD * 0.55
+  );
+};
+
+const getSquatPosture = (landmarks: NormalizedLandmark[]) => {
+  const keyIndices = [11, 12, 23, 24, 25, 26, 27, 28];
+  const points = keyIndices
+    .map((index) => landmarks[index])
+    .filter((point) => point && (point.visibility ?? 0) >= REP_BODY_LANDMARK_MIN_VISIBILITY);
+  const shoulders = getAverageWithMinVisibility(
+    landmarks,
+    [11, 12],
+    REP_BODY_LANDMARK_MIN_VISIBILITY,
+  );
+  const ankles = getAverageWithMinVisibility(landmarks, [27, 28], REP_BODY_LANDMARK_MIN_VISIBILITY);
+
+  if (!shoulders || !ankles || points.length < 5) return false;
+
+  const xs = points.map((point) => point.x);
+  const ys = points.map((point) => point.y);
+  const horizontalSpread = Math.max(...xs) - Math.min(...xs);
+  const verticalSpread = Math.max(...ys) - Math.min(...ys);
+  const shoulderToAnkleGap = Math.abs(shoulders.y - ankles.y);
+
+  return (
+    verticalSpread >= SQUAT_POSTURE_MIN_VERTICAL_SPREAD &&
+    shoulderToAnkleGap >= SQUAT_POSTURE_MIN_VERTICAL_SPREAD * 0.82 &&
+    horizontalSpread <= SQUAT_POSTURE_MAX_HORIZONTAL_SPREAD
   );
 };
 
@@ -379,6 +448,48 @@ const estimatePushUp = (poseRes: PoseLandmarkerResult | null, tracker: PushUpTra
   };
 };
 
+const estimateSquat = (poseRes: PoseLandmarkerResult | null, tracker: SquatTracker) => {
+  const pose = poseRes?.landmarks[0];
+  if (!pose) {
+    return {
+      squatCount: tracker.count,
+      squatPhase: tracker.phase,
+      squatReady: false,
+      squatProgress: 0,
+    };
+  }
+
+  const now = performance.now();
+  const inSquatPosture = getSquatPosture(pose);
+  const kneeAngle = getAverageKneeAngle(pose);
+  const kneeExtend = updateRepSignal(
+    tracker.kneeExtend,
+    inSquatPosture && kneeAngle != null ? kneeAngle / 180 : null,
+    now,
+    SQUAT_RANGE_MIN,
+  );
+  const rising = now - tracker.kneeExtend.lastRisingAt <= REP_RISING_GRACE_MS;
+  const reachedTop = kneeExtend.reachedTop && rising;
+
+  if (reachedTop && now - tracker.lastRepAt > SQUAT_COOLDOWN_MS) {
+    tracker.count += 1;
+    tracker.phase = "up";
+    tracker.kneeExtend.phase = "up";
+    tracker.lastRepAt = now;
+  } else if (kneeExtend.phase === "down") {
+    tracker.phase = "down";
+  } else if (tracker.phase === "calibrating" && kneeExtend.ready) {
+    tracker.phase = kneeExtend.progress > 0.5 ? "up" : "down";
+  }
+
+  return {
+    squatCount: tracker.count,
+    squatPhase: tracker.phase,
+    squatReady: inSquatPosture && kneeExtend.ready,
+    squatProgress: inSquatPosture ? kneeExtend.progress : 0,
+  };
+};
+
 export function VisionApp() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -388,11 +499,18 @@ export function VisionApp() {
   const poseLandmarkerRef = useRef<PoseLandmarker | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const lastPushUpSoundCountRef = useRef(0);
+  const lastSquatSoundCountRef = useRef(0);
   const revealStartedRef = useRef(false);
   const pushUpTrackerRef = useRef<PushUpTracker>({
     count: 0,
     phase: "calibrating",
     elbowExtend: createRepSignalTracker(),
+    lastRepAt: 0,
+  });
+  const squatTrackerRef = useRef<SquatTracker>({
+    count: 0,
+    phase: "calibrating",
+    kneeExtend: createRepSignalTracker(),
     lastRepAt: 0,
   });
 
@@ -408,6 +526,10 @@ export function VisionApp() {
     pushUpPhase: "calibrating" as RepPhase,
     pushUpReady: false,
     pushUpProgress: 0,
+    squatCount: 0,
+    squatPhase: "calibrating" as RepPhase,
+    squatReady: false,
+    squatProgress: 0,
     fps: 0,
   });
   const fpsRef = useRef({ frames: 0, t0: performance.now() });
@@ -483,7 +605,7 @@ export function VisionApp() {
     }
   }, []);
 
-  const resetRepTracker = useCallback(() => {
+  const resetPushUpTracker = useCallback(() => {
     lastPushUpSoundCountRef.current = 0;
     pushUpTrackerRef.current = {
       count: 0,
@@ -500,6 +622,29 @@ export function VisionApp() {
       pushUpProgress: 0,
     }));
   }, []);
+
+  const resetSquatTracker = useCallback(() => {
+    lastSquatSoundCountRef.current = 0;
+    squatTrackerRef.current = {
+      count: 0,
+      phase: "calibrating",
+      kneeExtend: createRepSignalTracker(),
+      lastRepAt: 0,
+    };
+    setStats((current) => ({
+      ...current,
+      poseDetected: false,
+      squatCount: 0,
+      squatPhase: "calibrating",
+      squatReady: false,
+      squatProgress: 0,
+    }));
+  }, []);
+
+  const resetRepTracker = useCallback(() => {
+    resetPushUpTracker();
+    resetSquatTracker();
+  }, [resetPushUpTracker, resetSquatTracker]);
 
   useEffect(() => {
     if (stats.pushUpCount < REVEAL_PUSHUP_COUNT || revealStartedRef.current) return;
@@ -616,8 +761,13 @@ export function VisionApp() {
       }
 
       const pushUps = estimatePushUp(poseRes, pushUpTrackerRef.current);
+      const squats = estimateSquat(poseRes, squatTrackerRef.current);
       if (pushUps.pushUpCount > lastPushUpSoundCountRef.current) {
         lastPushUpSoundCountRef.current = pushUps.pushUpCount;
+        playRepSound();
+      }
+      if (squats.squatCount > lastSquatSoundCountRef.current) {
+        lastSquatSoundCountRef.current = squats.squatCount;
         playRepSound();
       }
 
@@ -638,6 +788,10 @@ export function VisionApp() {
         pushUpPhase: pushUps.pushUpPhase,
         pushUpReady: pushUps.pushUpReady,
         pushUpProgress: pushUps.pushUpProgress,
+        squatCount: squats.squatCount,
+        squatPhase: squats.squatPhase,
+        squatReady: squats.squatReady,
+        squatProgress: squats.squatProgress,
         fps,
       });
     },
@@ -771,6 +925,12 @@ export function VisionApp() {
               >
                 {stats.pushUpCount} push-ups
               </Badge>
+              <Badge
+                variant="secondary"
+                className="font-mono tabular-nums backdrop-blur bg-background/70"
+              >
+                {stats.squatCount} squats
+              </Badge>
             </div>
           )}
         </Card>
@@ -784,9 +944,9 @@ export function VisionApp() {
               <Button
                 size="icon"
                 variant="ghost"
-                onClick={resetRepTracker}
+                onClick={resetPushUpTracker}
                 className="h-7 w-7 -mt-1 -mr-1"
-                aria-label="Reset exercise counters"
+                aria-label="Reset push-up counter"
               >
                 <RotateCcw className="h-3.5 w-3.5" />
               </Button>
@@ -812,6 +972,46 @@ export function VisionApp() {
               {stats.pushUpReady
                 ? "Lower into the push-up, then press back up to count one rep."
                 : "Get into a side-view push-up position so the tracker can learn your range."}
+            </p>
+            <p className="mt-2 text-[10px] text-muted-foreground leading-relaxed">
+              Unlocks at {REVEAL_PUSHUP_COUNT} push-ups. Squats are counted separately.
+            </p>
+          </Card>
+
+          <Card className="p-3">
+            <div className="flex items-start justify-between gap-2">
+              <h2 className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground mb-2 flex items-center gap-1.5">
+                <Activity className="h-3 w-3" /> SQUATS
+              </h2>
+              <Button
+                size="icon"
+                variant="ghost"
+                onClick={resetSquatTracker}
+                className="h-7 w-7 -mt-1 -mr-1"
+                aria-label="Reset squat counter"
+              >
+                <RotateCcw className="h-3.5 w-3.5" />
+              </Button>
+            </div>
+            <div className="flex items-end justify-between gap-3">
+              <p className="text-4xl font-semibold tabular-nums leading-none">{stats.squatCount}</p>
+              <Badge
+                variant={stats.squatReady ? "default" : "secondary"}
+                className="capitalize text-[10px] font-normal"
+              >
+                {stats.poseDetected ? stats.squatPhase : "No pose"}
+              </Badge>
+            </div>
+            <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-muted">
+              <div
+                className="h-full rounded-full bg-primary transition-[width] duration-150"
+                style={{ width: `${Math.round(stats.squatProgress * 100)}%` }}
+              />
+            </div>
+            <p className="mt-2 text-[11px] text-muted-foreground leading-relaxed">
+              {stats.squatReady
+                ? "Squat down, then stand tall again to count one rep."
+                : "Stand in view with shoulders, hips, knees, and ankles visible."}
             </p>
           </Card>
         </aside>
