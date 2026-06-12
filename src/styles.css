@@ -142,3 +142,7 @@
     color: var(--color-foreground);
   }
 }
+
+.backlight-svg{
+  filter: url(#blur-and-scale);
+}

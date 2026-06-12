@@ -11,6 +11,7 @@ import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { Loader2, Sparkles, Sun, Moon, ShieldCheck, Activity, RotateCcw, X } from "lucide-react";
 import { useTheme } from "@/hooks/use-theme";
+import AllSvgs from "@/components/AllSvgs";
 
 type RepPhase = "calibrating" | "down" | "up";
 type DecryptFromHex = (encoded: string, key: string) => string;
@@ -852,6 +853,7 @@ export function VisionApp() {
 
   return (
     <div className="min-h-screen bg-background text-foreground">
+      <AllSvgs />
       <header className="border-b border-border sticky top-0 z-10 bg-background/80 backdrop-blur supports-[backdrop-filter]:bg-background/60">
         <div className="max-w-6xl mx-auto px-4 h-14 flex items-center justify-between gap-4">
           <div className="flex items-center gap-2 min-w-0">
@@ -885,7 +887,7 @@ export function VisionApp() {
       </header>
 
       <main className="max-w-6xl mx-auto px-4 py-4 grid lg:grid-cols-[1fr_300px] gap-4">
-        <Card className="relative overflow-hidden bg-muted/30 border-border aspect-video flex items-center justify-center p-0">
+        <Card className="backlight-svg relative overflow-hidden bg-muted/30 border-0 aspect-video flex items-center justify-center p-0">
           {loading && (
             <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-background/90 px-6 backdrop-blur">
               <Loader2 className="h-6 w-6 animate-spin text-primary" />
